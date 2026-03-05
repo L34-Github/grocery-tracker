@@ -316,32 +316,6 @@ export default function GroceryTracker() {
   const [deleting,     setDeleting]     = useState(false);
   const [toast,        setToast]        = useState(null);
 
-  // ── On mount: load GSI then attempt silent re-auth ───────────────────────
-  useEffect(() => {
-    loadGsiScript()
-      .then(() => {
-        setGsiReady(true);
-        // Attempt silent re-auth using stored email hint — no popup
-        setAuthLoading(true);
-        setStatus("loading");
-        return silentSignIn();
-      })
-      .then(async (userData) => {
-        if (userData) {
-          setUser(userData);
-          await loadData(userData.accessToken);
-        } else {
-          // Silent auth not possible — show sign-in button normally
-          setStatus("signed-out");
-        }
-      })
-      .catch(err => {
-        setAuthError(err.message);
-        setStatus("signed-out");
-      })
-      .finally(() => setAuthLoading(false));
-  }, [loadData]);
-
   const showToast = (msg, type = "ok") => {
     setToast({ msg, type });
     setTimeout(() => setToast(null), 3000);
@@ -373,6 +347,32 @@ export default function GroceryTracker() {
       setRefreshing(false);
     }
   }, []);
+
+  // ── On mount: load GSI then attempt silent re-auth ───────────────────────
+  useEffect(() => {
+    loadGsiScript()
+      .then(() => {
+        setGsiReady(true);
+        // Attempt silent re-auth using stored email hint — no popup
+        setAuthLoading(true);
+        setStatus("loading");
+        return silentSignIn();
+      })
+      .then(async (userData) => {
+        if (userData) {
+          setUser(userData);
+          await loadData(userData.accessToken);
+        } else {
+          // Silent auth not possible — show sign-in button normally
+          setStatus("signed-out");
+        }
+      })
+      .catch(err => {
+        setAuthError(err.message);
+        setStatus("signed-out");
+      })
+      .finally(() => setAuthLoading(false));
+  }, [loadData]);
 
   const handleSignIn = async () => {
     setAuthLoading(true);
