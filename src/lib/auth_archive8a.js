@@ -2,39 +2,22 @@
 // Google OAuth 2.0 via Google Identity Services (GSI)
 // Restricts write access to authorized email addresses only.
 //
-// v3 changes:
-//   - GOOGLE_CLIENT_ID sourced from import.meta.env.VITE_GOOGLE_CLIENT_ID
-//   - Authorized emails sourced from VITE_AUTH_EMAIL_1 / VITE_AUTH_EMAIL_2
-//   - All credential values now live in .env (gitignored), not in source code
-//   - All other logic identical to v2 (silent re-auth, hint persistence, etc.)
+// v2 changes:
+//   - Saves email hint to localStorage after sign-in
+//   - Attempts silent re-auth on page load using stored hint (no popup)
+//   - Clears hint on sign-out
+//   - Falls back gracefully to manual sign-in if silent attempt fails
 // ─────────────────────────────────────────────────────────────────────────────
 
-export const GOOGLE_CLIENT_ID = import.meta.env.VITE_GOOGLE_CLIENT_ID;
-
-if (!GOOGLE_CLIENT_ID) {
-  console.error(
-    "[auth] VITE_GOOGLE_CLIENT_ID is not set. " +
-    "Copy .env.example → .env and fill in your values, then restart the dev server."
-  );
-}
+export const GOOGLE_CLIENT_ID = "865184434385-7hgpsbeksv7sir67ro37ovdlcl1oetgs.apps.googleusercontent.com";
 
 // ── Authorized users ──────────────────────────────────────────────────────────
-// Sourced from .env — keeps email addresses out of the public GitHub repo.
-// This is a client-side UX gate. True write security is the VITE_WRITE_SECRET
-// enforced server-side in Apps Script.
 const AUTHORIZED_EMAILS = [
-  import.meta.env.VITE_AUTH_EMAIL_1,
-  import.meta.env.VITE_AUTH_EMAIL_2,
-].filter(Boolean);
+  "loganp83@gmail.com",     // Logan
+  "tyezearian@gmail.com",   // Darling
+];
 
-if (AUTHORIZED_EMAILS.length === 0) {
-  console.error(
-    "[auth] No authorized emails configured. " +
-    "Set VITE_AUTH_EMAIL_1 and VITE_AUTH_EMAIL_2 in your .env file."
-  );
-}
-
-// Scopes: read + write Sheets + profile/email for the auth check
+// Scopes needed: read + write Sheets + profile email for auth check
 const SCOPES = "https://www.googleapis.com/auth/spreadsheets openid email profile";
 
 // localStorage key for persisting the email hint between sessions
@@ -70,6 +53,7 @@ async function fetchAndValidateProfile(accessToken) {
     throw new Error(`Unauthorized: ${email} is not on the access list.`);
   }
 
+  // Persist email hint for next session's silent re-auth
   try { localStorage.setItem(HINT_KEY, email); } catch (_) {}
 
   return {
@@ -81,22 +65,26 @@ async function fetchAndValidateProfile(accessToken) {
 }
 
 // ── Silent sign-in — no popup, uses stored email hint ────────────────────────
+// Returns user object if successful, null if silent auth is not possible.
+// Should be called on app load before showing any UI.
 export function silentSignIn() {
   return new Promise((resolve) => {
     let hint = "";
     try { hint = localStorage.getItem(HINT_KEY) || ""; } catch (_) {}
 
+    // No hint stored — can't attempt silent auth
     if (!hint) { resolve(null); return; }
 
     let settled = false;
     const settle = (val) => { if (!settled) { settled = true; resolve(val); } };
 
+    // Timeout: if Google doesn't respond quickly, fall back to manual sign-in
     const timer = setTimeout(() => settle(null), 5000);
 
     const tokenClient = window.google.accounts.oauth2.initTokenClient({
       client_id: GOOGLE_CLIENT_ID,
       scope:     SCOPES,
-      hint,
+      hint,                   // tells Google which account to use silently
       callback:  async (tokenResponse) => {
         clearTimeout(timer);
         if (tokenResponse.error) { settle(null); return; }
@@ -109,6 +97,7 @@ export function silentSignIn() {
       },
     });
 
+    // prompt: "" means "no UI interaction" — fails fast if session is gone
     tokenClient.requestAccessToken({ prompt: "" });
   });
 }

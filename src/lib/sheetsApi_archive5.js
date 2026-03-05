@@ -1,12 +1,6 @@
 // ── sheetsApi.js ──────────────────────────────────────────────────────────────
 // All Google Sheets API v4 calls in one place.
 //
-// v2 changes:
-//   - SPREADSHEET_ID and APPS_SCRIPT_URL sourced from env vars (gitignored)
-//   - VITE_WRITE_SECRET injected into addItem and deleteItem JSONP calls
-//     so Apps Script can reject unauthorized mutations
-//   - Costco added as 5th store (col H price, col M on-sale)
-//
 // Sheet structure (Weekly Prices tab):
 //   Row 1-3 : Headers / metadata
 //   Row 4+  : Data rows
@@ -27,22 +21,18 @@
 //   M(12) = Costco on-sale
 // ─────────────────────────────────────────────────────────────────────────────
 
-// All sensitive values come from .env — never hardcoded here.
-export const SPREADSHEET_ID = import.meta.env.VITE_SPREADSHEET_ID;
-const APPS_SCRIPT_URL       = import.meta.env.VITE_APPS_SCRIPT_URL;
-const WRITE_SECRET          = import.meta.env.VITE_WRITE_SECRET;
+export const SPREADSHEET_ID = "1VzOd7Qs4cq84H9XHjpI89QoUlT_-OI1GLSVkl0PW44E";
+const SHEET_NAME     = "Weekly Prices";
+const BASE_URL       = "https://sheets.googleapis.com/v4/spreadsheets";
 
-if (!SPREADSHEET_ID || !APPS_SCRIPT_URL || !WRITE_SECRET) {
-  console.error(
-    "[sheetsApi] One or more required env vars are missing. " +
-    "Check your .env file: VITE_SPREADSHEET_ID, VITE_APPS_SCRIPT_URL, VITE_WRITE_SECRET"
-  );
-}
+// Apps Script Web App URL — used for addItem and deleteItem (avoids CORS)
+const APPS_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbz4ls7nJkJ_P7ddpaaXjA9Mwoox7mKg56zjXE8ZnlJ7xp8PCTb9_EcLVFcBHx3XxuPy/exec";
 
-const SHEET_NAME = "Weekly Prices";
-const BASE_URL   = "https://sheets.googleapis.com/v4/spreadsheets";
+// Store key → column index (0-based in row array)
+const PRICE_COL  = { winco: 3, fredmeyer: 4, safeway: 5, yokes: 6, costco: 7 };
+const SALE_COL   = { winco: 8, fredmeyer: 9, safeway: 10, yokes: 11, costco: 12 };
 
-// Store key → sheet column letter (for range notation in Sheets API calls)
+// Store key → sheet column letter (for range notation)
 const PRICE_LETTER = { winco: "D", fredmeyer: "E", safeway: "F", yokes: "G", costco: "H" };
 const SALE_LETTER  = { winco: "I", fredmeyer: "J", safeway: "K", yokes: "L", costco: "M" };
 
@@ -83,6 +73,7 @@ function parseRows(rows) {
       continue;
     }
 
+    // Skip non-numeric rows (empty, totals, etc.)
     if (isNaN(Number(col_A)) || col_A === "") continue;
     if (typeof col_B === "string" && col_B.includes("TOTAL")) continue;
 
@@ -95,7 +86,7 @@ function parseRows(rows) {
     };
 
     items.push({
-      sheetRow: i + 1,        // 1-based sheet row number for API calls
+      sheetRow: i + 1,          // 1-based sheet row number for API calls
       rowNum:   Number(col_A),
       category: currentCat,
       name:     String(col_B || "").trim(),
@@ -105,14 +96,14 @@ function parseRows(rows) {
         fredmeyer: priceOrNull(row[4]),
         safeway:   priceOrNull(row[5]),
         yokes:     priceOrNull(row[6]),
-        costco:    priceOrNull(row[7]),
+        costco:    priceOrNull(row[7]),   // col H
       },
       onSale: {
         winco:     row[8]  === true || row[8]  === "TRUE",
         fredmeyer: row[9]  === true || row[9]  === "TRUE",
         safeway:   row[10] === true || row[10] === "TRUE",
         yokes:     row[11] === true || row[11] === "TRUE",
-        costco:    row[12] === true || row[12] === "TRUE",
+        costco:    row[12] === true || row[12] === "TRUE",  // col M
       },
     });
   }
@@ -123,16 +114,13 @@ function parseRows(rows) {
 export async function getItems(accessToken) {
   const data = await sheetsRequest(
     accessToken,
-    `/values/${encodeURIComponent(SHEET_NAME)}!A:M`
+    `/values/${encodeURIComponent(SHEET_NAME)}!A:M`  // extended to col M
   );
   const rows = data.values || [];
   return parseRows(rows);
 }
 
 // ── WRITE: Update a single price cell ────────────────────────────────────────
-// sheetRow : 1-based row number
-// storeKey : "winco" | "fredmeyer" | "safeway" | "yokes" | "costco"
-// price    : number or null (null clears the cell)
 export async function updatePrice(accessToken, sheetRow, storeKey, price) {
   const col   = PRICE_LETTER[storeKey];
   const range = `${SHEET_NAME}!${col}${sheetRow}`;
@@ -163,15 +151,17 @@ export async function toggleSale(accessToken, sheetRow, storeKey, isOnSale) {
   );
 }
 
-// ── JSONP helper — shared by addItem and deleteItem ───────────────────────────
-function jsonpCall(params) {
+// ── WRITE: Add item — delegates to Apps Script via JSONP ─────────────────────
+export async function addItem(accessToken, category, name, size) {
   return new Promise((resolve, reject) => {
-    const cbName = "_gs_" + Date.now();
-    params.set("callback", cbName);
-
-    // Inject the write secret — Apps Script validates this server-side
-    params.set("secret", WRITE_SECRET);
-
+    const cbName = "_gsAdd_" + Date.now();
+    const params = new URLSearchParams({
+      action:   "addItem",
+      category: category,
+      name:     name,
+      size:     size,
+      callback: cbName,
+    });
     const url    = `${APPS_SCRIPT_URL}?${params}`;
     const script = document.createElement("script");
 
@@ -185,7 +175,7 @@ function jsonpCall(params) {
     script.onerror = () => {
       delete window[cbName];
       document.head.removeChild(script);
-      reject(new Error("JSONP request failed (network error or script blocked)"));
+      reject(new Error("addItem JSONP request failed"));
     };
 
     script.src = url;
@@ -193,26 +183,34 @@ function jsonpCall(params) {
   });
 }
 
-// ── WRITE: Add item — delegates to Apps Script via JSONP ─────────────────────
-// Apps Script handles row insertion, alphabetical ordering, and renumbering.
-// Returns fresh item list so React can update without a second round-trip.
-export async function addItem(accessToken, category, name, size) {
-  const params = new URLSearchParams({
-    action:   "addItem",
-    category,
-    name,
-    size,
-  });
-  return jsonpCall(params);   // resolves with { ok, msg, items }
-}
-
 // ── WRITE: Delete item — delegates to Apps Script via JSONP ──────────────────
 export async function deleteItem(accessToken, sheetRow) {
-  const params = new URLSearchParams({
-    action:   "deleteItem",
-    sheetRow: String(sheetRow),
+  return new Promise((resolve, reject) => {
+    const cbName = "_gsDel_" + Date.now();
+    const params = new URLSearchParams({
+      action:   "deleteItem",
+      sheetRow: sheetRow,
+      callback: cbName,
+    });
+    const url    = `${APPS_SCRIPT_URL}?${params}`;
+    const script = document.createElement("script");
+
+    window[cbName] = (data) => {
+      delete window[cbName];
+      document.head.removeChild(script);
+      if (data.error) reject(new Error(data.error));
+      else            resolve(data);
+    };
+
+    script.onerror = () => {
+      delete window[cbName];
+      document.head.removeChild(script);
+      reject(new Error("deleteItem JSONP request failed"));
+    };
+
+    script.src = url;
+    document.head.appendChild(script);
   });
-  return jsonpCall(params);   // resolves with { ok, msg, items }
 }
 
 // ── Helper: get week label string ─────────────────────────────────────────────
